@@ -3,27 +3,56 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Chapter 3 - Updating UI with JavaScript</title>
+    <title>React State & Events - Chapter 7</title>
   </head>
   <body>
     <div id="app"></div>
 
-    <script type="text/javascript">
-      // Select the div element with 'app' id
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+    <!-- Babel for JSX support -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Your React Code -->
+    <script type="text/jsx">
       const app = document.getElementById('app');
 
-      // Create a new H1 element
-      const header = document.createElement('h1');
+      // Header component with a title prop
+      function Header({ title }) {
+        return <h1>{title ? title : 'Default Title'}</h1>;
+      }
 
-      // Create a new text node for the H1 element
-      const text = 'Develop. Preview. Ship.';
-      const headerContent = document.createTextNode(text);
+      // HomePage component
+      function HomePage() {
+        const names = ['Ada Lovelace', 'Grace Hopper', 'Margaret Hamilton'];
 
-      // Append the text to the H1 element
-      header.appendChild(headerContent);
+        // Declare state for likes
+        const [likes, setLikes] = React.useState(0);
 
-      // Place the H1 element inside the div
-      app.appendChild(header);
+        // Handle button click
+        function handleClick() {
+          setLikes(likes + 1);
+        }
+
+        return (
+          <div>
+            <Header title="Develop. Preview. Ship." />
+
+            <ul>
+              {names.map((name) => (
+                <li key={name}>{name}</li>
+              ))}
+            </ul>
+
+            <button onClick={handleClick}>Likes ({likes})</button>
+          </div>
+        );
+      }
+
+      const root = ReactDOM.createRoot(app);
+      root.render(<HomePage />);
     </script>
   </body>
 </html>
