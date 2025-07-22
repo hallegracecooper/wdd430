@@ -2,36 +2,90 @@ import postgres from 'postgres';
 import {
   CustomerField,
   CustomersTableType,
+  Invoice,
   InvoiceForm,
   InvoicesTable,
   LatestInvoiceRaw,
   Revenue,
 } from './definitions';
 import { formatCurrency } from './utils';
+import {
+  invoices as placeholderInvoices,
+  customers as placeholderCustomers,
+  revenue as placeholderRevenue,
+} from './placeholder-data';
 
-const sql = postgres(process.env.POSTGRES_URL!, { ssl: 'require' });
+// If a connection string isn't supplied we won't attempt to connect to Postgres
+const hasDatabaseUrl = !!process.env.POSTGRES_URL;
+
+// sql will be null when no DB connection is possible. Always check for truthiness
+const sql = hasDatabaseUrl ? postgres(process.env.POSTGRES_URL!, { ssl: 'require' }) : null;
+
+/* -------------------------------------------------------------------------- */
+/*                               Helper utils                                */
+/* -------------------------------------------------------------------------- */
+
+function mergeInvoiceCustomer(inv: Invoice & { customer_id: string }) {
+  const customer = placeholderCustomers.find((c) => c.id === inv.customer_id);
+  if (!customer) return null;
+  return {
+    id: inv.id,
+    customer_id: inv.customer_id,
+    name: customer.name,
+    email: customer.email,
+    image_url: customer.image_url,
+    date: inv.date,
+    amount: inv.amount,
+    status: inv.status,
+  } as InvoicesTable;
+}
 
 export async function fetchRevenue() {
+  // If we don't have a DB connection just return local placeholder data
+  if (!sql) {
+    return placeholderRevenue;
+  }
+
   try {
     // We artificially delay a response for demo purposes.
     // Don't do this in production :)
     console.log('Fetching revenue data...');
     await new Promise((resolve) => setTimeout(resolve, 3000));
 
-    const data = await sql<Revenue[]>`SELECT * FROM revenue`;
+    const db = sql!;
+    const data = await db<Revenue[]>`SELECT * FROM revenue`;
 
     console.log('Data fetch completed after 3 seconds.');
 
     return data;
   } catch (error) {
     console.error('Database Error:', error);
-    throw new Error('Failed to fetch revenue data.');
+    return placeholderRevenue;
   }
 }
 
 export async function fetchLatestInvoices() {
+  if (!sql) {
+    // Join placeholder invoices & customers and format
+    const latestInvoicesJoin = [...placeholderInvoices]
+      .sort((a, b) => (a.date < b.date ? 1 : -1))
+      .slice(0, 5)
+      .map((inv) => {
+        const cust = placeholderCustomers.find((c) => c.id === inv.customer_id)!;
+        return {
+          id: inv.id,
+          name: cust.name,
+          image_url: cust.image_url,
+          email: cust.email,
+          amount: formatCurrency(inv.amount),
+        };
+      });
+    return latestInvoicesJoin;
+  }
+
   try {
-    const data = await sql<LatestInvoiceRaw[]>`
+    const db = sql!;
+    const data = await db<LatestInvoiceRaw[]>`
       SELECT invoices.amount, customers.name, customers.image_url, customers.email, invoices.id
       FROM invoices
       JOIN customers ON invoices.customer_id = customers.id
@@ -45,18 +99,55 @@ export async function fetchLatestInvoices() {
     return latestInvoices;
   } catch (error) {
     console.error('Database Error:', error);
-    throw new Error('Failed to fetch the latest invoices.');
+    // Fallback
+    const latestInvoicesJoin = [...placeholderInvoices]
+      .sort((a, b) => (a.date < b.date ? 1 : -1))
+      .slice(0, 5)
+      .map((inv) => {
+        const cust = placeholderCustomers.find((c) => c.id === inv.customer_id)!;
+        return {
+          id: inv.id,
+          name: cust.name,
+          image_url: cust.image_url,
+          email: cust.email,
+          amount: formatCurrency(inv.amount),
+        };
+      });
+    return latestInvoicesJoin;
   }
 }
 
 export async function fetchCardData() {
+  if (!sql) {
+    const numberOfInvoices = placeholderInvoices.length;
+    const numberOfCustomers = placeholderCustomers.length;
+    const totalPaidInvoices = formatCurrency(
+      placeholderInvoices
+        .filter((i) => i.status === 'paid')
+        .reduce((acc, cur) => acc + cur.amount, 0),
+    );
+    const totalPendingInvoices = formatCurrency(
+      placeholderInvoices
+        .filter((i) => i.status === 'pending')
+        .reduce((acc, cur) => acc + cur.amount, 0),
+    );
+
+    return {
+      numberOfCustomers,
+      numberOfInvoices,
+      totalPaidInvoices,
+      totalPendingInvoices,
+    };
+  }
+
   try {
     // You can probably combine these into a single SQL query
     // However, we are intentionally splitting them to demonstrate
     // how to initialize multiple queries in parallel with JS.
-    const invoiceCountPromise = sql`SELECT COUNT(*) FROM invoices`;
-    const customerCountPromise = sql`SELECT COUNT(*) FROM customers`;
-    const invoiceStatusPromise = sql`SELECT
+    const db = sql!;
+    const invoiceCountPromise = db`SELECT COUNT(*) FROM invoices`;
+    const customerCountPromise = db`SELECT COUNT(*) FROM customers`;
+    const invoiceStatusPromise = db`SELECT
          SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END) AS "paid",
          SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END) AS "pending"
          FROM invoices`;
@@ -80,7 +171,25 @@ export async function fetchCardData() {
     };
   } catch (error) {
     console.error('Database Error:', error);
-    throw new Error('Failed to fetch card data.');
+    // Fallback to placeholder
+    const numberOfInvoices = placeholderInvoices.length;
+    const numberOfCustomers = placeholderCustomers.length;
+    const totalPaidInvoices = formatCurrency(
+      placeholderInvoices
+        .filter((i) => i.status === 'paid')
+        .reduce((acc, cur) => acc + cur.amount, 0),
+    );
+    const totalPendingInvoices = formatCurrency(
+      placeholderInvoices
+        .filter((i) => i.status === 'pending')
+        .reduce((acc, cur) => acc + cur.amount, 0),
+    );
+    return {
+      numberOfCustomers,
+      numberOfInvoices,
+      totalPaidInvoices,
+      totalPendingInvoices,
+    };
   }
 }
 
@@ -91,8 +200,32 @@ export async function fetchFilteredInvoices(
 ) {
   const offset = (currentPage - 1) * ITEMS_PER_PAGE;
 
+  if (!sql) {
+    // Local filtering when no database is available
+    const normalizedQuery = query.toLowerCase();
+
+    const merged = placeholderInvoices
+      .map((inv) => mergeInvoiceCustomer(inv))
+      .filter((row): row is InvoicesTable => !!row);
+
+    const filtered = merged.filter((row) => {
+      return (
+        row.name.toLowerCase().includes(normalizedQuery) ||
+        row.email.toLowerCase().includes(normalizedQuery) ||
+        row.amount.toString().includes(normalizedQuery) ||
+        row.date.toString().includes(normalizedQuery) ||
+        row.status.toLowerCase().includes(normalizedQuery)
+      );
+    });
+
+    return filtered
+      .sort((a, b) => (a.date < b.date ? 1 : -1))
+      .slice(offset, offset + ITEMS_PER_PAGE);
+  }
+
   try {
-    const invoices = await sql<InvoicesTable[]>`
+    const db = sql!;
+    const invoices = await db<InvoicesTable[]>`
       SELECT
         invoices.id,
         invoices.amount,
@@ -116,13 +249,52 @@ export async function fetchFilteredInvoices(
     return invoices;
   } catch (error) {
     console.error('Database Error:', error);
-    throw new Error('Failed to fetch invoices.');
+    // Fallback
+    const normalizedQuery = query.toLowerCase();
+    const merged = placeholderInvoices
+      .map((inv) => mergeInvoiceCustomer(inv))
+      .filter((row): row is InvoicesTable => !!row);
+
+    const filtered = merged.filter((row) => {
+      return (
+        row.name.toLowerCase().includes(normalizedQuery) ||
+        row.email.toLowerCase().includes(normalizedQuery) ||
+        row.amount.toString().includes(normalizedQuery) ||
+        row.date.toString().includes(normalizedQuery) ||
+        row.status.toLowerCase().includes(normalizedQuery)
+      );
+    });
+
+    return filtered
+      .sort((a, b) => (a.date < b.date ? 1 : -1))
+      .slice(offset, offset + ITEMS_PER_PAGE);
   }
 }
 
 export async function fetchInvoicesPages(query: string) {
+  if (!sql) {
+    const normalizedQuery = query.toLowerCase();
+
+    const merged = placeholderInvoices
+      .map((inv) => mergeInvoiceCustomer(inv))
+      .filter((row): row is InvoicesTable => !!row);
+
+    const filteredCount = merged.filter((row) => {
+      return (
+        row.name.toLowerCase().includes(normalizedQuery) ||
+        row.email.toLowerCase().includes(normalizedQuery) ||
+        row.amount.toString().includes(normalizedQuery) ||
+        row.date.toString().includes(normalizedQuery) ||
+        row.status.toLowerCase().includes(normalizedQuery)
+      );
+    }).length;
+
+    return Math.ceil(filteredCount / ITEMS_PER_PAGE);
+  }
+
   try {
-    const data = await sql`SELECT COUNT(*)
+    const db = sql!;
+    const data = await db`SELECT COUNT(*)
     FROM invoices
     JOIN customers ON invoices.customer_id = customers.id
     WHERE
@@ -137,13 +309,37 @@ export async function fetchInvoicesPages(query: string) {
     return totalPages;
   } catch (error) {
     console.error('Database Error:', error);
-    throw new Error('Failed to fetch total number of invoices.');
+    const normalizedQuery = query.toLowerCase();
+    const merged = placeholderInvoices
+      .map((inv) => mergeInvoiceCustomer(inv))
+      .filter((row): row is InvoicesTable => !!row);
+    const filteredCount = merged.filter((row) => {
+      return (
+        row.name.toLowerCase().includes(normalizedQuery) ||
+        row.email.toLowerCase().includes(normalizedQuery) ||
+        row.amount.toString().includes(normalizedQuery) ||
+        row.date.toString().includes(normalizedQuery) ||
+        row.status.toLowerCase().includes(normalizedQuery)
+      );
+    }).length;
+
+    return Math.ceil(filteredCount / ITEMS_PER_PAGE);
   }
 }
 
 export async function fetchInvoiceById(id: string) {
+  if (!sql) {
+    const inv = placeholderInvoices.find((i) => i.id === id);
+    if (!inv) return undefined;
+    return {
+      ...inv,
+      amount: inv.amount / 100,
+    } as InvoiceForm;
+  }
+
   try {
-    const data = await sql<InvoiceForm[]>`
+    const db = sql!;
+    const data = await db<InvoiceForm[]>`
       SELECT
         invoices.id,
         invoices.customer_id,
@@ -163,13 +359,23 @@ export async function fetchInvoiceById(id: string) {
     return invoice[0];
   } catch (error) {
     console.error('Database Error:', error);
-    throw new Error('Failed to fetch invoice.');
+    const inv = placeholderInvoices.find((i) => i.id === id);
+    if (!inv) return undefined;
+    return {
+      ...inv,
+      amount: inv.amount / 100,
+    } as InvoiceForm;
   }
 }
 
 export async function fetchCustomers() {
+  if (!sql) {
+    return placeholderCustomers.map((c) => ({ id: c.id, name: c.name }));
+  }
+
   try {
-    const customers = await sql<CustomerField[]>`
+    const db = sql!;
+    const customers = await db<CustomerField[]>`
       SELECT
         id,
         name
@@ -180,13 +386,53 @@ export async function fetchCustomers() {
     return customers;
   } catch (err) {
     console.error('Database Error:', err);
-    throw new Error('Failed to fetch all customers.');
+    return placeholderCustomers.map((c) => ({ id: c.id, name: c.name }));
   }
 }
 
 export async function fetchFilteredCustomers(query: string) {
+  if (!sql) {
+    const normalizedQuery = query.toLowerCase();
+    const data = placeholderCustomers.map((customer) => {
+      const customerInvoices = placeholderInvoices.filter(
+        (inv) => inv.customer_id === customer.id,
+      );
+      const total_pending = customerInvoices
+        .filter((i) => i.status === 'pending')
+        .reduce((acc, cur) => acc + cur.amount, 0);
+      const total_paid = customerInvoices
+        .filter((i) => i.status === 'paid')
+        .reduce((acc, cur) => acc + cur.amount, 0);
+
+      return {
+        id: customer.id,
+        name: customer.name,
+        email: customer.email,
+        image_url: customer.image_url,
+        total_invoices: customerInvoices.length,
+        total_pending,
+        total_paid,
+      } as CustomersTableType;
+    });
+
+    const filtered = data.filter(
+      (cust) =>
+        cust.name.toLowerCase().includes(normalizedQuery) ||
+        cust.email.toLowerCase().includes(normalizedQuery),
+    );
+
+    const formatted = filtered.map((customer) => ({
+      ...customer,
+      total_pending: formatCurrency(customer.total_pending),
+      total_paid: formatCurrency(customer.total_paid),
+    }));
+
+    return formatted;
+  }
+
   try {
-    const data = await sql<CustomersTableType[]>`
+    const db = sql!;
+    const data = await db<CustomersTableType[]>`
 		SELECT
 		  customers.id,
 		  customers.name,
@@ -213,6 +459,42 @@ export async function fetchFilteredCustomers(query: string) {
     return customers;
   } catch (err) {
     console.error('Database Error:', err);
-    throw new Error('Failed to fetch customer table.');
+    // Fallback to local
+    const normalizedQuery = query.toLowerCase();
+    const data = placeholderCustomers.map((customer) => {
+      const customerInvoices = placeholderInvoices.filter(
+        (inv) => inv.customer_id === customer.id,
+      );
+      const total_pending = customerInvoices
+        .filter((i) => i.status === 'pending')
+        .reduce((acc, cur) => acc + cur.amount, 0);
+      const total_paid = customerInvoices
+        .filter((i) => i.status === 'paid')
+        .reduce((acc, cur) => acc + cur.amount, 0);
+
+      return {
+        id: customer.id,
+        name: customer.name,
+        email: customer.email,
+        image_url: customer.image_url,
+        total_invoices: customerInvoices.length,
+        total_pending,
+        total_paid,
+      } as CustomersTableType;
+    });
+
+    const filtered = data.filter(
+      (cust) =>
+        cust.name.toLowerCase().includes(normalizedQuery) ||
+        cust.email.toLowerCase().includes(normalizedQuery),
+    );
+
+    const formatted = filtered.map((customer) => ({
+      ...customer,
+      total_pending: formatCurrency(customer.total_pending),
+      total_paid: formatCurrency(customer.total_paid),
+    }));
+
+    return formatted;
   }
 }
